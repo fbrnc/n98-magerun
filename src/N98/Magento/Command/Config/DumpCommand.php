@@ -2,13 +2,12 @@
 
 namespace N98\Magento\Command\Config;
 
-use N98\Magento\Command\AbstractMagentoCommand;
+use InvalidArgumentException;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
-use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
-class DumpCommand extends AbstractMagentoCommand
+class DumpCommand extends AbstractConfigCommand
 {
     protected function configure()
     {
@@ -17,12 +16,36 @@ class DumpCommand extends AbstractMagentoCommand
             ->addArgument('xpath', InputArgument::OPTIONAL, 'XPath to filter XML output', null)
             ->setDescription('Dump merged xml config')
         ;
+
+        $help = <<<HELP
+Dumps merged XML configuration to stdout. Useful to see all the XML.
+You can filter the XML with first argument.
+
+Examples:
+
+  Config of catalog module
+
+   $ n98-magerun.phar config:dump global/catalog
+
+   See module order in XML
+
+   $ n98-magerun.phar config:dump modules
+
+   Write output to file
+
+   $ n98-magerun.phar config:dump > extern_file.xml
+
+HELP;
+        $this->setHelp($help);
+
     }
 
     /**
-     * @param \Symfony\Component\Console\Input\InputInterface $input
-     * @param \Symfony\Component\Console\Output\OutputInterface $output
-     * @return int|void
+     * @param InputInterface  $input
+     * @param OutputInterface $output
+     *
+     * @return int|null
+     * @throws InvalidArgumentException
      */
     protected function execute(InputInterface $input, OutputInterface $output)
     {
@@ -30,12 +53,13 @@ class DumpCommand extends AbstractMagentoCommand
         if ($this->initMagento()) {
             $config = \Mage::app()->getConfig()->getNode($input->getArgument('xpath'));
             if (!$config) {
-                throw new \InvalidArgumentException('xpath was not found');
+                throw new InvalidArgumentException('xpath was not found');
             }
-            $dom = \DOMDocument::loadXML($config->asXml());
+            $dom = new \DOMDocument();
             $dom->preserveWhiteSpace = false;
             $dom->formatOutput = true;
-            $output->writeln($dom->saveXML());
+            $dom->loadXML($config->asXml());
+            $output->writeln($dom->saveXML(), OutputInterface::OUTPUT_RAW);
         }
     }
 }

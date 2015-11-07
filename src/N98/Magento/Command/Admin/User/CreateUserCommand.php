@@ -4,7 +4,6 @@ namespace N98\Magento\Command\Admin\User;
 
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
-use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 class CreateUserCommand extends AbstractAdminUserCommand
@@ -14,17 +13,18 @@ class CreateUserCommand extends AbstractAdminUserCommand
         $this
             ->setName('admin:user:create')
             ->addArgument('username', InputArgument::OPTIONAL, 'Username')
-            ->addArgument('email', InputArgument::OPTIONAL, 'Email')
+            ->addArgument('email', InputArgument::OPTIONAL, 'Email, empty string = generate')
             ->addArgument('password', InputArgument::OPTIONAL, 'Password')
             ->addArgument('firstname', InputArgument::OPTIONAL, 'Firstname')
             ->addArgument('lastname', InputArgument::OPTIONAL, 'Lastname')
+            ->addArgument('role', InputArgument::OPTIONAL, 'Role')
             ->setDescription('Create admin user.')
         ;
     }
 
     /**
-     * @param \Symfony\Component\Console\Input\InputInterface $input
-     * @param \Symfony\Component\Console\Output\OutputInterface $output
+     * @param InputInterface $input
+     * @param OutputInterface $output
      * @return int|void
      */
     protected function execute(InputInterface $input, OutputInterface $output)
@@ -32,34 +32,40 @@ class CreateUserCommand extends AbstractAdminUserCommand
         $this->detectMagento($output, true);
         if ($this->initMagento()) {
 
-            // Username
-            if (($username = $input->getArgument('username')) == null) {
+            $username = $this->getOrAskForArgument('username', $input, $output);
+            $email = $this->getOrAskForArgument('email', $input, $output);
+            if (($password = $input->getArgument('password')) === null) {
                 $dialog = $this->getHelperSet()->get('dialog');
-                $username = $dialog->ask($output, '<question>Username:</question>');
+                $password = $dialog->askHiddenResponse($output, '<question>Password:</question>');
             }
 
-            // Email
-            if (($email = $input->getArgument('email')) == null) {
-                $dialog = $this->getHelperSet()->get('dialog');
-                $email = $dialog->ask($output, '<question>Email:</question>');
-            }
+            $firstname = $this->getOrAskForArgument('firstname', $input, $output);
+            $lastname = $this->getOrAskForArgument('lastname', $input, $output);
+            if (($roleName = $input->getArgument('role')) != null) {
+                $role = $this->getRoleModel()->load($roleName, 'role_name');
+                if (!$role->getId()) {
+                    $output->writeln('<error>Role was not found</error>');
+                    return;
+                }
+            } else {
+                // create new role if not yet existing
+                $role = $this->getRoleModel()->load('Development', 'role_name');
+                if (!$role->getId()) {
+                    $role->setName('Development')
+                        ->setRoleType('G')
+                        ->save();
 
-            // Password
-            if (($password = $input->getArgument('password')) == null) {
-                $dialog = $this->getHelperSet()->get('dialog');
-                $password = $dialog->ask($output, '<question>Password:</question>');
-            }
+                    $resourceAll = ($this->_magentoMajorVersion == self::MAGENTO_MAJOR_VERSION_2) ?
+                        \Mage_Backend_Model_Acl_Config::ACL_RESOURCE_ALL : 'all';
 
-            // Firstname
-            if (($firstname = $input->getArgument('firstname')) == null) {
-                $dialog = $this->getHelperSet()->get('dialog');
-                $firstname = $dialog->ask($output, '<question>Firstname:</question>');
-            }
+                    // give "all" privileges to role
+                    $this->getRulesModel()
+                        ->setRoleId($role->getId())
+                        ->setResources(array($resourceAll))
+                        ->saveRel();
 
-            // Lastname
-            if (($lastname = $input->getArgument('lastname')) == null) {
-                $dialog = $this->getHelperSet()->get('dialog');
-                $lastname = $dialog->ask($output, '<question>Lastname:</question>');
+                    $output->writeln('<info>The role <comment>Development</comment> was automatically created.</info>');
+                }
             }
 
             // create new user
@@ -73,23 +79,6 @@ class CreateUserCommand extends AbstractAdminUserCommand
                     'is_active' => 1
                 ))->save();
 
-            // create new role if not yet existing
-            $role = $this->getRoleModel()->load('Development', 'role_name');
-            if(!$role->getId()) {
-                $role->setName('Development')
-                    ->setRoleType('G')
-                    ->save();
-
-                $resourceAll = ($this->_magentoMajorVersion == self::MAGENTO_MAJOR_VERSION_2) ?
-                    \Mage_Backend_Model_Acl_Config::ACL_RESOURCE_ALL : 'all';
-
-                // give "all" privileges to role
-                $this->getRulesModel()
-                    ->setRoleId($role->getId())
-                    ->setResources(array($resourceAll))
-                    ->saveRel();
-            }
-
             if ($this->_magentoMajorVersion == self::MAGENTO_MAJOR_VERSION_2) {
                 $user->setRoleId($role->getId())
                     ->save();
@@ -100,7 +89,6 @@ class CreateUserCommand extends AbstractAdminUserCommand
             }
 
             $output->writeln('<info>User <comment>' . $username . '</comment> successfully created</info>');
-
         }
     }
 }

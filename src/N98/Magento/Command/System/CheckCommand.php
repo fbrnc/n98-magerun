@@ -2,217 +2,206 @@
 
 namespace N98\Magento\Command\System;
 
+use LogicException;
 use N98\Magento\Command\AbstractMagentoCommand;
-use Symfony\Component\Console\Input\InputArgument;
+use N98\Magento\Command\CommandAware;
+use N98\Magento\Command\CommandConfigAware;
+use N98\Magento\Command\System\Check\Result;
+use N98\Magento\Command\System\Check\ResultCollection;
+use N98\Util\Console\Helper\Table\Renderer\RendererFactory;
+use N98\Util\Unicode\Charset;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
+/**
+ * Class CheckCommand
+ *
+ * @package N98\Magento\Command\System
+ */
 class CheckCommand extends AbstractMagentoCommand
 {
-    /**
-     * @var array
-     */
-    protected $infos;
+    const UNICODE_CHECKMARK_CHAR = 10004;
+    const UNICODE_CROSS_CHAR = 10006;
 
     /**
-     * @var int
+     * Command config
+     *
+     * @var array
      */
-    protected $_verificationTimeOut = 30;
+    protected $_config;
 
     protected function configure()
     {
         $this
             ->setName('sys:check')
-            ->setDescription('Checks Magento System');
+            ->setDescription('Checks Magento System')
+            ->addOption(
+                'format',
+                null,
+                InputOption::VALUE_OPTIONAL,
+                'Output Format. One of [' . implode(',', RendererFactory::getFormats()) . ']'
+            )
+        ;
+
+        $help = <<<HELP
+- Checks missing files and folders
+- Security
+- PHP Extensions (Required and Bytecode Cache)
+- MySQL InnoDB Engine
+HELP;
+        $this->setHelp($help);
     }
 
     /**
-     * @param \Symfony\Component\Console\Input\InputInterface $input
-     * @param \Symfony\Component\Console\Output\OutputInterface $output
+     * @param InputInterface  $input
+     * @param OutputInterface $output
+     *
      * @return int|void
      */
     protected function execute(InputInterface $input, OutputInterface $output)
     {
+        $this->_config = $this->getCommandConfig();
         $this->detectMagento($output);
-        if ($this->initMagento($output, true)) {
+        if ($this->initMagento()) {
 
-            if ($this->_magentoMajorVersion == self::MAGENTO_MAJOR_VERSION_2) {
-                $output->writeln("<error>WARNING: Magento 2 requirements are not yet defined. Until then Magento 1 requirements are checked.</error>");
-            }
-
-            $this->checkFilesystem($input, $output);
-            $this->checkPhp($input, $output);
-            $this->checkSecurity($input, $output);
-            $this->checkMysql($input, $output);
-        }
-    }
-
-    /**
-     * @param \Symfony\Component\Console\Input\InputInterface $input
-     * @param \Symfony\Component\Console\Output\OutputInterface $output
-     * @return int|void
-     */
-    protected function checkFilesystem($input, $output)
-    {
-        $this->writeSection($output, 'Check: Filesystem');
-
-        /**
-         * Check folders
-         */
-        $folders = array(
-            array('media', 'Used for images and other media files.'),
-            array('var', 'Used for caching, reports, etc.'),
-            array('var/cache', 'Used for caching'),
-            array('var/session', 'Used as file based sesssion save'),
-        );
-
-        foreach ($folders as $folder) {
-            if (file_exists($this->_magentoRootFolder . DIRECTORY_SEPARATOR . $folder[0])) {
-                $output->writeln("<info>Folder <comment>" . $folder[0] . "</comment> found.</info>");
-                if (!is_writeable($this->_magentoRootFolder . DIRECTORY_SEPARATOR . $folder[0])) {
-                    $output->writeln("<error>Folder " . $folder[0] . " is not writeable!</error><comment> Usage: " . $folder[1] . "</comment>");
+            $results = new ResultCollection();
+            foreach ($this->_config['checks'] as $checkGroup => $checkGroupClasses) {
+                $results->setResultGroup($checkGroup);
+                foreach ($checkGroupClasses as $checkGroupClass) {
+                    $this->_invokeCheckClass($results, $checkGroupClass);
                 }
-            } else {
-                $output->writeln("<error>Folder " . $folder[0] . " not found!</error><comment> Usage: " . $folder[1] . "</comment>");
             }
-        }
 
-        /**
-         * Check files
-         */
-        $files = array(
-            array('app/etc/local.xml', 'Magento local configuration.'),
-            array('index.php.sample', 'Used to generate staging websites in Magento enterprise edition'),
-        );
-
-        foreach ($files as $file) {
-            if (file_exists($this->_magentoRootFolder . DIRECTORY_SEPARATOR . $file[0])) {
-                $output->writeln("<info>File <comment>" . $file[0] . "</comment> found.</info>");
+            if ($input->getOption('format')) {
+                $this->_printTable($input, $output, $results);
             } else {
-                $output->writeln("<error>File " . $file[0] . " not found!</error><comment> Usage: " . $file[1] . "</comment>");
+                $this->_printResults($output, $results);
             }
         }
     }
 
     /**
-     * @param \Symfony\Component\Console\Input\InputInterface $input
-     * @param \Symfony\Component\Console\Output\OutputInterface $output
-     * @return int|void
+     * @param ResultCollection $results
+     * @param string           $checkGroupClass name
      */
-    protected function checkPhp($input, $output)
+    protected function _invokeCheckClass(ResultCollection $results, $checkGroupClass)
     {
-        $this->writeSection($output, 'Check: PHP');
+        $check = $this->_createCheck($checkGroupClass);
 
-        $requiredExtensions = array(
-            'simplexml',
-            'mcrypt',
-            'hash',
-            'gd',
-            'dom',
-            'iconv',
-            'curl',
-            'soap',
-            'pdo',
-            'pdo_mysql',
-        );
-
-        foreach ($requiredExtensions as $ext) {
-            if (extension_loaded($ext)) {
-                $output->writeln("<info>Required PHP Module <comment>$ext</comment> found.</info>");
-            } else {
-                $output->writeln("<error>Required PHP Module $ext not found!</error>");
-            }
-        }
-
-        /**
-         * Check Bytecode Cache
-         */
-        $bytecopdeCacheExtensions = array(
-            'apc',
-            'eaccelerator',
-            'xcache',
-            'Zend Optimizer'
-        );
-        $bytecodeCacheExtensionLoaded = false;
-        $bytecodeCacheExtension = null;
-        foreach ($bytecopdeCacheExtensions as $ext) {
-            if (extension_loaded($ext)) {
-                $bytecodeCacheExtension = $ext;
-                $bytecodeCacheExtensionLoaded = true;
+        switch (true) {
+            case $check instanceof Check\SimpleCheck:
+                $check->check($results);
                 break;
-            }
-        }
-        if ($bytecodeCacheExtensionLoaded) {
-            $output->writeln("<info>Bytecode Cache <comment>$bytecodeCacheExtension</comment> found.</info>");
-        } else {
-            $output->writeln("<error>No Bytecode-Cache found!</error> <comment>It's recommended to install anyone of " . implode(', ', $bytecopdeCacheExtensions) . ".</comment>");
-        }
-    }
 
-    /**
-     * @param \Symfony\Component\Console\Input\InputInterface $input
-     * @param \Symfony\Component\Console\Output\OutputInterface $output
-     * @return int|void
-     */
-    protected function checkSecurity($input, $output)
-    {
-        $this->writeSection($output, 'Check: Security');
-
-        $filePath = 'app/etc/local.xml';
-        $defaultUnsecureBaseURL = (string) \Mage::getConfig()->getNode('default/' . \Mage_Core_Model_Store::XML_PATH_UNSECURE_BASE_URL);
-
-        $http = new \Varien_Http_Adapter_Curl();
-        $http->setConfig(array('timeout' => $this->_verificationTimeOut));
-        $http->write(\Zend_Http_Client::POST, $defaultUnsecureBaseURL . $filePath);
-        $responseBody = $http->read();
-        $responseCode = \Zend_Http_Response::extractCode($responseBody);
-        $http->close();
-
-        if ($responseCode === 200) {
-            $output->writeln("<error>$filePath can be accessed from outside!</error>");
-        } else {
-            $output->writeln("<info><comment>$filePath</comment> cannot be accessed from outside.</info>");
-        }
-    }
-
-    /**
-     * @param \Symfony\Component\Console\Input\InputInterface $input
-     * @param \Symfony\Component\Console\Output\OutputInterface $output
-     * @return int|void
-     */
-    protected function checkMysql($input, $output)
-    {
-        $this->writeSection($output, 'Check: MySQL');
-
-        $dbAdapter = $this->_getModel('core/resource', 'Mage_Core_Model_Resource')->getConnection('core_write');
-
-        /**
-         * Check Version
-         */
-        $mysqlVersion = $dbAdapter->fetchOne('SELECT VERSION()');
-        if (version_compare($mysqlVersion, '4.1.20', '>=')) {
-            $output->writeln("<info>MySQL Version <comment>$mysqlVersion</comment> found.</info>");
-        } else {
-            $output->writeln("<error>MySQL Version $mysqlVersion found. Upgrade your MySQL Version.</error>");
-        }
-
-            /**
-         * Check Engines
-         */
-        $engines = $dbAdapter->fetchAll('SHOW ENGINES');
-        $innodbFound = false;
-        foreach ($engines as $engine) {
-            if (strtolower($engine['Engine']) == 'innodb') {
-                $innodbFound = true;
+            case $check instanceof Check\StoreCheck:
+                if (!$stores = \Mage::app()->getStores()) {
+                    $this->_markCheckWarning($results, 'stores', $checkGroupClass);
+                }
+                foreach ($stores as $store) {
+                    $check->check($results, $store);
+                }
                 break;
+
+            case $check instanceof Check\WebsiteCheck:
+                if (!$websites = \Mage::app()->getWebsites()) {
+                    $this->_markCheckWarning($results, 'websites', $checkGroupClass);
+                }
+                foreach ($websites as $website) {
+                    $check->check($results, $website);
+                }
+                break;
+
+            default:
+                throw new LogicException(
+                    sprintf('Unhandled check-class "%s"', $checkGroupClass)
+                );
+        }
+    }
+
+    /**
+     * @param OutputInterface  $output
+     * @param ResultCollection $results
+     */
+    protected function _printResults(OutputInterface $output, ResultCollection $results)
+    {
+        $lastResultGroup = null;
+        foreach ($results as $result) {
+            if ($result->getResultGroup() != $lastResultGroup) {
+                $this->writeSection($output, str_pad(strtoupper($result->getResultGroup()), 60, ' ', STR_PAD_BOTH));
             }
+            if ($result->getMessage()) {
+                switch ($result->getStatus()) {
+                    case Result::STATUS_WARNING:
+                    case Result::STATUS_ERROR:
+                        $output->write('<error>' . \N98\Util\Unicode\Charset::convertInteger(Charset::UNICODE_CROSS_CHAR) . '</error> ');
+                        break;
+
+                    case Result::STATUS_OK:
+                    default:
+                        $output->write('<info>' . \N98\Util\Unicode\Charset::convertInteger(Charset::UNICODE_CHECKMARK_CHAR) . '</info> ');
+                        break;
+                }
+                $output->writeln($result->getMessage());
+            }
+
+            $lastResultGroup = $result->getResultGroup();
+        }
+    }
+
+    /**
+     * @param InputInterface   $input
+     * @param OutputInterface  $output
+     * @param ResultCollection $results
+     */
+    protected function _printTable(InputInterface $input, OutputInterface $output, ResultCollection $results)
+    {
+        $table = array();
+        foreach ($results as $result) {
+            /* @var $result Result */
+            $table[] = array(
+                $result->getResultGroup(),
+                strip_tags($result->getMessage()),
+                $result->getStatus()
+            );
         }
 
-        if ($innodbFound) {
-            $output->writeln("<info>Required MySQL Storage Engine <comment>InnoDB</comment> found.</info>");
-        } else {
-            $output->writeln("<error>Required MySQL Storage Engine \"InnoDB\" not found!</error>");
+        $this->getHelper('table')
+            ->setHeaders(array('Group', 'Message', 'Result'))
+            ->renderByFormat($output, $table, $input->getOption('format'));
+    }
+
+    /**
+     * @param string $checkGroupClass
+     *
+     * @return object
+     */
+    private function _createCheck($checkGroupClass)
+    {
+        $check = new $checkGroupClass();
+
+        if ($check instanceof CommandAware) {
+            $check->setCommand($this);
         }
+        if ($check instanceof CommandConfigAware) {
+            $check->setCommandConfig($this->_config);
+
+            return $check;
+        }
+
+        return $check;
+    }
+
+    /**
+     * @param ResultCollection $results
+     * @param string           $context
+     * @param string           $checkGroupClass
+     */
+    private function _markCheckWarning(ResultCollection $results, $context, $checkGroupClass)
+    {
+        $result = $results->createResult();
+        $result->setMessage('<error>No ' . $context . ' configured to run store check:</error> <comment>' . basename($checkGroupClass) . '</comment>');
+        $result->setStatus($result::STATUS_WARNING);
+        $results->addResult($result);
     }
 }
